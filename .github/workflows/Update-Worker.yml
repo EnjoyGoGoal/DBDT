@@ -1,0 +1,84 @@
+name: Auto Update _worker.js
+
+on:
+  schedule:
+    - cron: '0 0 * * *'    # 每天00:00 UTC运行
+  workflow_dispatch:       # 支持手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 仓库
+        uses: actions/checkout@v4
+
+      - name: 检查 update_type.txt
+        run: |
+          if [ ! -f "update_type.txt" ]; then
+            echo "1" > update_type.txt  # 默认使用正式版本
+            echo "未找到 update_type.txt，已创建默认值为 1（release）"
+          fi
+
+      - name: 读取版本类型（0=prerelease，1=release）
+        id: read_type
+        run: |
+          type=$(cat update_type.txt | tr -d '\n' | tr -d '\r')
+          if [ "$type" = "0" ]; then
+            echo "使用预发布版本"
+            echo "release_type=prerelease" >> $GITHUB_ENV
+          else
+            echo "使用正式版本"
+            echo "release_type=release" >> $GITHUB_ENV
+          fi
+
+      - name: 获取最新版本 tag
+        id: get_tag
+        run: |
+          if [ "$release_type" = "prerelease" ]; then
+            tag=$(curl -s https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases \
+              | jq -r 'map(select(.prerelease and (.draft == false))) | sort_by(.published_at) | .[-1].tag_name')
+          else
+            tag=$(curl -s https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases/latest \
+              | jq -r '.tag_name')
+          fi
+
+          if [ -z "$tag" ]; then
+            echo "未找到目标版本"
+            exit 1
+          fi
+
+          echo "latest_tag=$tag" >> $GITHUB_ENV
+
+      - name: 读取当前本地版本
+        run: |
+          if [ -f version.txt ]; then
+            echo "current_version=$(cat version.txt | tr -d '\n' | tr -d '\r')" >> $GITHUB_ENV
+          else
+            echo "current_version=" >> $GITHUB_ENV
+          fi
+
+      - name: 判断是否需要更新
+        run: |
+          if [ "$current_version" = "$latest_tag" ]; then
+            echo "无需更新"
+            echo "need_update=false" >> $GITHUB_ENV
+          else
+            echo "需要更新"
+            echo "need_update=true" >> $GITHUB_ENV
+          fi
+
+      - name: 下载并替换 _worker.js
+        if: env.need_update == 'true'
+        run: |
+          curl -L -o _worker.js "https://github.com/bia-pain-bache/BPB-Worker-Panel/releases/download/${{ env.latest_tag }}/worker.js"
+          echo "${{ env.latest_tag }}" > version.txt
+
+      - name: 提交更新
+        if: env.need_update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add _worker.js version.txt
+          git commit -m "Update _worker.js to version ${{ env.latest_tag }}"
+          git push
